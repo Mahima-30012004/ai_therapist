@@ -7,273 +7,271 @@ from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import streamlit.components.v1 as components
 from datetime import datetime
-from collections import Counter
-import re
+import sqlite3
+import hashlib
 
-# --- PAGE CONFIG ---
+# --- 1. BACKEND DATABASE ENGINE ---
+def init_db():
+    conn = sqlite3.connect('mindcare_backend.db')
+    c = conn.cursor()
+    c.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)')
+    c.execute('''CREATE TABLE IF NOT EXISTS goals 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, goal_text TEXT, status TEXT, date TEXT)''')
+    conn.commit()
+    conn.close()
+
+def make_hashes(password): return hashlib.sha256(str.encode(password)).hexdigest()
+def check_hashes(password, hashed_text): return hashed_text if make_hashes(password) == hashed_text else False
+
+def add_user(username, password):
+    conn = sqlite3.connect('mindcare_backend.db')
+    c = conn.cursor()
+    try:
+        c.execute('INSERT INTO users(username,password) VALUES (?,?)', (username, make_hashes(password)))
+        conn.commit()
+        return True
+    except: return False
+    finally: conn.close()
+
+def login_user(username, password):
+    conn = sqlite3.connect('mindcare_backend.db')
+    c = conn.cursor()
+    c.execute('SELECT password FROM users WHERE username =?', (username,))
+    data = c.fetchone()
+    conn.close()
+    return check_hashes(password, data[0]) if data else False
+
+def add_goal(username, goal):
+    conn = sqlite3.connect('mindcare_backend.db')
+    c = conn.cursor()
+    c.execute('INSERT INTO goals (username, goal_text, status, date) VALUES (?, ?, ?, ?)', (username, goal, "Pending", datetime.now().strftime("%Y-%m-%d")))
+    conn.commit()
+    conn.close()
+
+def get_goals(username):
+    conn = sqlite3.connect('mindcare_backend.db')
+    c = conn.cursor()
+    c.execute('SELECT id, goal_text, status FROM goals WHERE username = ?', (username,))
+    data = c.fetchall()
+    conn.close()
+    return data
+
+def delete_goal(goal_id):
+    conn = sqlite3.connect('mindcare_backend.db')
+    c = conn.cursor()
+    c.execute('DELETE FROM goals WHERE id = ?', (goal_id,))
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# --- 2. PAGE CONFIG ---
 st.set_page_config(page_title="MindCare India", page_icon="🧠", layout="wide")
+if "messages" not in st.session_state: st.session_state.messages = []
+if "logged_in" not in st.session_state: st.session_state.logged_in = False
+if "username" not in st.session_state: st.session_state.username = ""
 
-# --- MULTI-LANGUAGE DICTIONARY ---
+# --- 3. LANGUAGE DICTIONARY ---
 LANG_DICT = {
     "English": {
-        "title": "MindCare India 🧠",
-        "chat_tab": "💬 Assistant",
-        "phq_tab": "📊 PHQ-9 Check",
-        "breath_tab": "🧘 Breathing Space",
-        "cloud_tab": "📊 Mood Analytics",
-        "emergency": "Emergency Support Lines:",
-        "kolkata_help": "Kolkata Helpline: 033-24637401",
-        "submit_btn": "Submit Assessment",
-        "inhale": "Inhale", "hold": "Hold", "exhale": "Exhale",
-        "rhythm": "Follow the circle's rhythm",
-        "chat_placeholder": "Say hello or tell me how you feel...",
-        "details_header": "Patient Details",
-        "name_label": "Full Name",
-        "age_label": "Age",
-        "gender_label": "Gender",
-        "gender_options": ["Male", "Female", "Other", "Prefer not to say"],
-        "q_list": [
-            "Little interest in things", "Feeling down/hopeless", "Sleep issues", 
-            "Low energy", "Appetite issues", "Feeling like a failure", 
-            "Concentration trouble", "Slow/restless", "Thoughts of self-harm"
-        ],
-        "responses": {
-            "greetings": ["Hello! How can I help you today?", "Namaste! How are you feeling?", "Hi! I'm here to listen."],
-            "wellbeing": ["I'm doing well, thank you for asking! How are you?", "I'm here and ready to support you."],
-            "identity": ["I am MindCare, your AI companion.", "I'm an AI designed to help you process your thoughts."],
-            "sleep": ["Sleep is vital. Are you struggling to drift off?", "Try a warm drink or reading a physical book before bed."],
-            "general": ["Tell me more about that.", "I'm listening.", "That sounds like a lot to carry.", "How does that make you feel?"]
-        }
+        "title": "MindCare India 🧠", "chat_tab": "💬 Assistant", "phq_tab": "📊 PHQ-9 Check", "breath_tab": "🧘 Breathing Space", "cloud_tab": "📈 Progress & Goals",
+        "emergency": "Emergency Support Lines:", "kolkata_help": "Kolkata Helpline: 033-24637401", "submit_btn": "Submit Assessment",
+        "details_header": "Patient Details", "name_label": "Full Name", "age_label": "Age", "gender_label": "Gender", "gender_options": ["Male", "Female", "Other", "Prefer not to say"],
+        "q_list": ["Little interest in things", "Feeling down/hopeless", "Sleep issues", "Low energy", "Appetite issues", "Feeling like a failure", "Concentration trouble", "Slow/restless", "Thoughts of self-harm"],
+        "responses": {"greetings": ["Hello! How can I help you today?", "Namaste! How are you feeling?", "Hi! I'm here to listen and help."]}
     },
-    "Hindi": {
-        "title": "माइंडकेयर इंडिया 🧠",
-        "chat_tab": "💬 सहायक",
-        "phq_tab": "📊 मानसिक जांच",
-        "breath_tab": "🧘 सांस का अभ्यास",
-        "cloud_tab": "📊 मूड विश्लेषण",
-        "emergency": "आपातकालीन सहायता:",
-        "kolkata_help": "कोलकाता हेल्पलाइन: 033-24637401",
-        "submit_btn": "जमा करें",
-        "details_header": "व्यक्तिगत विवरण",
-        "name_label": "पूरा नाम",
-        "age_label": "आयु",
-        "gender_label": "लिंग",
-        "gender_options": ["पुरुष", "महिला", "अन्य", "बताना नहीं चाहते"],
-        "inhale": "सांस लें", "hold": "रोकें", "exhale": "छोड़ें",
-        "rhythm": "चक्र की लय का पालन करें",
-        "chat_placeholder": "नमस्ते कहें या अपनी भावनाएं बताएं...",
-        "q_list": [
-            "कामों में कम दिलचस्पी", "उदास या निराश महसूस करना", "सोने में परेशानी",
-            "थकान या ऊर्जा की कमी", "भूख कम या ज्यादा लगना", "खुद को असफल मानना",
-            "ध्यान केंद्रित करने में कठिनाई", "सुस्ती या बेचैनी", "खुद को नुकसान पहुँचाने के विचार"
-        ],
-        "responses": {
-            "greetings": ["नमस्ते! मैं आज आपकी कैसे मदद कर सकता हूँ?", "नमस्ते! आप कैसा महसूस कर रहे हैं?", "नमस्ते! मैं आपको सुनने के लिए यहाँ हूँ।"],
-            "wellbeing": ["मैं ठीक हूँ, पूछने के लिए धन्यवाद! आप कैसे हैं?", "मैं आपकी मदद के लिए तैयार हूँ।"],
-            "identity": ["मैं माइंडकेयर हूँ, आपका एआई साथी।", "मैं एक एआई हूँ जो आपके मानसिक स्वास्थ्य के लिए बना है।"],
-            "sleep": ["नींद बहुत जरूरी है। क्या आपको सोने में दिक्कत हो रही है?", "सोने से पहले रिलैক্স करने की कोशिश करें।"],
-            "general": ["मुझे इसके बारे में और बताएं।", "मैं सुन रहा हूँ।", "यह चुनौतीपूर्ण लग रहा है।", "आपको कैसा महसूस हो रहा है?"]
-        }
-    },
-    "Bengali": {
-        "title": "মাইন্ডকেয়ার ইন্ডিয়া 🧠",
-        "chat_tab": "💬 সহায়ক",
-        "phq_tab": "📊 মানসিক পরীক্ষা",
-        "breath_tab": "🧘 নিশ্বাসের ব্যায়াম",
-        "cloud_tab": "📊 মুড বিশ্লেষণ",
-        "emergency": "জরুরী সহায়তা লাইন:",
-        "kolkata_help": "কলকাতা হেল্পলাইন: ০৩৩-২৪৬৩৭৪০১",
-        "submit_btn": "জমা দিন",
-        "details_header": "ব্যক্তিগত তথ্য",
-        "name_label": "পুরো নাম",
-        "age_label": "বয়স",
-        "gender_label": "লিঙ্গ",
-        "gender_options": ["পুরুষ", "মহিলা", "অন্যান্য", "বলতে ইচ্ছুক নই"],
-        "inhale": "নিশ্বাস নিন", "hold": "ধরে রাখুন", "exhale": "নিশ্বাস ছাড়ুন",
-        "rhythm": "চক্রের ছন্দ অনুসরণ করুন",
-        "chat_placeholder": "হ্যালো বলুন বা আপনার মনের কথা জানান...",
-        "q_list": [
-            "কাজে আগ্রহ কম পাওয়া", "মন খারাপ বা হতাশ বোধ করা", "ঘুমে সমস্যা",
-            "ক্লান্তি বা শক্তির অভাব", "খিদে কমে যাওয়া বা বেশি খাওয়া", "নিজেকে ব্যর্থ মনে হওয়া",
-            "মনোযোগ দিতে অসুবিধা", "ধীরে চলাফেরা বা ছটফটানি", "নিজের ক্ষতি করার চিন্তা"
-        ],
-        "responses": {
-            "greetings": ["হ্যালো! আমি আপনাকে কীভাবে সাহায্য করতে পারি?", "নমস্কার! আপনি কেমন বোধ করছেন?", "হ্যালো! আমি আপনার কথা শোনার জন্য আছি।"],
-            "wellbeing": ["আমি ভালো আছি, জিজ্ঞাসা করার জন্য ধন্যবাদ! আপনি কেমন আছেন?", "আমি আপনার সহায়তায় প্রস্তুত।"],
-            "identity": ["আমি মাইন্ডকেয়ার, আপনার এআই সঙ্গী।", "আমি আপনার মানসিক স্বাস্থ্যের সহায়তার জন্য তৈরি একটি এআই।"],
-            "sleep": ["ঘুম খুব দরকারি। আপনার কি ঘুমাতে অসুবিধা হচ্ছে?", "শোয়ার আগে ফোন থেকে দূরে থাকার চেষ্টা করুন।"],
-            "general": ["এই বিষয়ে আরো বলুন।", "আমি শুনছি আপনার কথা।", "আপনার মনের কথা শুনে আমি বুঝতে পারছি।", "এটি আপনাকে কেমন অনুভব করাচ্ছে?"]
-        }
-    }
+    "Hindi": { "title": "माइंडकेयर इंडिया 🧠", "chat_tab": "💬 सहायक", "phq_tab": "📊 जांच", "breath_tab": "🧘 सांस", "cloud_tab": "📈 लक्ष्य", "emergency": "सहायता:", "kolkata_help": "कोलकाता: 033-24637401", "submit_btn": "जमा करें", "details_header": "विवरण", "name_label": "नाम", "age_label": "आयु", "gender_label": "लिंग", "gender_options": ["पुरुष", "महिला", "अन्य"], "q_list": ["रुचि की कमी", "उदासी", "नींद", "थकान", "भूख", "असफलता", "एकाग्रता", "सुस्ती", "आत्म-नुकसान"], "responses": {"greetings": ["नमस्ते! मैं आपकी क्या मदद कर सकता हूँ?"]} },
+    "Bengali": { "title": "মাইন্ডকেয়ার ইন্ডিয়া 🧠", "chat_tab": "💬 সহায়ক", "phq_tab": "📊 পরীক্ষা", "breath_tab": "🧘 ব্যায়াম", "cloud_tab": "📈 লক্ষ্য", "emergency": "সহায়তা:", "kolkata_help": "কলকাতা: ০৩৩-২৪৬৩৭৪০১", "submit_btn": "জমা দিন", "details_header": "তথ্য", "name_label": "নাম", "age_label": "বয়স", "gender_label": "লিঙ্গ", "gender_options": ["পুরুষ", "মহিলা", "অন্যান্য"], "q_list": ["আগ্রহের অভাব", "মন খারাপ", "ঘুমের সমস্যা", "ক্লান্তি", "খিদে", "ব্যর্থতা", "মনোযোগ", "ধীরে চলা", "ক্ষতি করার চিন্তা"], "responses": {"greetings": ["হ্যালো! আমি আপনাকে কীভাবে সাহায্য করতে পারি?"]} }
 }
 
-# --- VOICE LOGIC ---
+# --- 4. VOICE LOGIC ---
 def speak_text(text, lang):
     lang_map = {"English": "en-US", "Hindi": "hi-IN", "Bengali": "bn-IN"}
     l_code = lang_map.get(lang, "en-US")
-    components.html(f"""<script>var msg = new SpeechSynthesisUtterance("{text}"); msg.lang = "{l_code}"; window.speechSynthesis.speak(msg);</script>""", height=0)
+    clean_text = text.replace('"', "'").replace('\n', ' ')
+    components.html(f"""<script>var msg = new SpeechSynthesisUtterance("{clean_text}"); msg.lang = "{l_code}"; window.speechSynthesis.speak(msg);</script>""", height=0)
 
 def voice_input_js(lang):
     lang_map = {"English": "en-US", "Hindi": "hi-IN", "Bengali": "bn-IN"}
     l_code = lang_map.get(lang, "en-US")
-    components.html(f"""
-        <script>
-        const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-        recognition.lang = '{l_code}';
-        recognition.onresult = (event) => {{
-            const text = event.results[0][0].transcript;
-            const streamlitDoc = window.parent.document;
-            const inputField = streamlitDoc.querySelector('textarea');
-            if(inputField) {{
-                inputField.value = text;
-                inputField.dispatchEvent(new Event('input', {{bubbles:true}}));
-            }}
-        }};
-        recognition.start();
-        </script>
-    """, height=0)
+    components.html(f"""<script>const r = new (window.SpeechRecognition || window.webkitSpeechRecognition)(); r.lang='{l_code}'; r.onresult=(e)=>{{const t=e.results[0][0].transcript; const d=window.parent.document; const i=d.querySelector('textarea'); if(i){{i.value=t; i.dispatchEvent(new Event('input',{{bubbles:true}}));}}}}; r.start();</script>""", height=0)
 
-# --- SESSION STATE ---
-if "messages" not in st.session_state: st.session_state.messages = []
-
-# --- SIDEBAR ---
+# --- 5. SIDEBAR (RESTORED) ---
 with st.sidebar:
-    st.title("Settings")
-    lang_choice = st.selectbox("Language / ভাষা", ["English", "Hindi", "Bengali"])
+    st.title("⚙️ Settings")
+    lang_choice = st.selectbox("Language / ভাষা / भाषा", ["English", "Hindi", "Bengali"])
     L = LANG_DICT[lang_choice]
-    st.error(L["emergency"])
-    st.markdown(f"- **Tele MANAS:** 14416\n- **{L['kolkata_help']}**")
-    if st.button("🗑️ Clear Chat"):
-        st.session_state.messages = []
-        st.rerun()
-
-# --- CUSTOM CSS ---
-st.markdown(f"""<style>
-.stApp {{ background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%); }}
-.chat-bubble {{ padding: 12px 18px; border-radius: 20px; margin-bottom: 10px; max-width: 85%; font-family: sans-serif; }}
-.assistant-bubble {{ background-color: white; align-self: flex-start; border: 1px solid #ddd; }}
-.user-bubble {{ background-color: #88c9bf; color: white; margin-left: auto; }}
-.instruction-box {{ background-color: #ffffff; padding: 20px; border-radius: 15px; border-left: 5px solid #88c9bf; box-shadow: 2px 2px 10px rgba(0,0,0,0.05); }}
-.circle-container {{ display: flex; flex-direction: column; align-items: center; justify-content: center; height: 350px; }}
-.circle {{ width: 100px; height: 100px; background: rgba(136, 201, 191, 0.6); border-radius: 50%; animation: breathCircle 16s infinite linear; display: flex; align-items: center; justify-content: center; position: relative; }}
-.breath-text {{ font-weight: bold; color: #2c3e50; font-size: 1.2rem; }}
-.breath-text::after {{ content: '{L["inhale"]}'; animation: breathText 16s infinite linear; }}
-@keyframes breathCircle {{ 0% {{ transform: scale(1); opacity: 0.4; }} 25% {{ transform: scale(2.5); opacity: 0.9; }} 50% {{ transform: scale(2.5); opacity: 0.9; }} 75% {{ transform: scale(1); opacity: 0.4; }} 100% {{ transform: scale(1); opacity: 0.4; }} }}
-@keyframes breathText {{ 0%, 24% {{ content: '{L["inhale"]}'; }} 25%, 49% {{ content: '{L["hold"]}'; }} 50%, 74% {{ content: '{L["exhale"]}'; }} 75%, 100% {{ content: '{L["hold"]}'; }} }}
-</style>""", unsafe_allow_html=True)
-
-# --- HEADER & TABS ---
-st.title(L["title"])
-tab1, tab2, tab3, tab4 = st.tabs([L["chat_tab"], L["phq_tab"], L["breath_tab"], L["cloud_tab"]])
-
-# --- TAB 1: CHAT ---
-with tab1:
-    col1, col2 = st.columns([9, 1])
-    with col2:
-        if st.button("🎙️"): voice_input_js(lang_choice)
-    for i, msg in enumerate(st.session_state.messages):
-        role_class = "user-bubble" if msg["role"] == "user" else "assistant-bubble"
-        st.write(f'<div class="chat-bubble {role_class}">{msg["content"]}</div>', unsafe_allow_html=True)
-        if msg["role"] == "assistant" and st.button(f"🔊 Listen", key=f"sp_{i}"):
-            speak_text(msg["content"], lang_choice)
-    if prompt := st.chat_input(L["chat_placeholder"]):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        user_input = prompt.lower()
-        res_list = L["responses"]
-        if any(word in user_input for word in ["hi", "hello", "hey"]): bot_res = random.choice(res_list["greetings"])
-        elif any(word in user_input for word in ["sleep"]): bot_res = random.choice(res_list["sleep"])
-        else: bot_res = random.choice(res_list["general"])
-        st.session_state.messages.append({"role": "assistant", "content": bot_res})
-        st.rerun()
-
-# --- TAB 2: ASSESSMENT ---
-with tab2:
-    st.subheader(L["phq_tab"])
-    st.write(f"### {L['details_header']}")
-    c1, c2, c3 = st.columns(3)
-    user_name = c1.text_input(L["name_label"])
-    user_age = c2.number_input(L["age_label"], 1, 120, 25)
-    user_gender = c3.selectbox(L["gender_label"], L["gender_options"])
+    
     st.divider()
+    if not st.session_state.logged_in:
+        st.subheader("🔐 Account")
+        auth_mode = st.radio("Mode", ["Login", "Sign Up"], horizontal=True)
+        user_in = st.text_input("Username")
+        pass_in = st.text_input("Password", type="password")
+        if st.button("Authenticate"):
+            if auth_mode == "Login":
+                if login_user(user_in, pass_in): st.session_state.logged_in = True; st.session_state.username = user_in; st.rerun()
+                else: st.error("Invalid Credentials")
+            else:
+                if add_user(user_in, pass_in): st.success("Account Created! Login now.")
+                else: st.error("User already exists.")
+    else:
+        st.success(f"Logged in as: {st.session_state.username}")
+        if st.button("Logout"): st.session_state.logged_in = False; st.session_state.username = ""; st.rerun()
+    
+    st.divider()
+    st.error(L["emergency"])
+    st.markdown(f"**Tele MANAS:** 14416\n\n**Helpline:** 033-24637401")
+    if st.button("🗑️ Clear Chat History"): st.session_state.messages = []; st.rerun()
+
+# --- 6. CUSTOM CSS (SMOOTH ANIMATION FIXED) ---
+st.markdown(f"""
+<style>
+    .stApp {{ background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%); }}
+    .stRadio > div {{ flex-direction: row; justify-content: center; background: white; padding: 10px; border-radius: 50px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); margin-bottom: 20px; }}
+    .chat-bubble {{ padding: 12px 18px; border-radius: 20px; margin-bottom: 15px; max-width: 85%; font-family: sans-serif; line-height: 1.6; border: 1px solid rgba(0,0,0,0.05); }}
+    .assistant-bubble {{ background-color: #ffffff; align-self: flex-start; box-shadow: 2px 2px 10px rgba(0,0,0,0.05); }}
+    .user-bubble {{ background-color: #88c9bf; color: white; margin-left: auto; text-align: left; box-shadow: -2px 2px 10px rgba(0,0,0,0.1); }}
+    
+    .breath-container {{ display: flex; flex-direction: column; align-items: center; justify-content: center; height: 400px; background: white; border-radius: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }}
+    .visualizer {{ width: 250px; height: 250px; border-radius: 50%; border: 8px solid #f0f2f6; display: flex; align-items: center; justify-content: center; position: relative; }}
+    
+    .inner-circle {{ 
+        width: 80px; height: 80px; 
+        background: #88c9bf; 
+        border-radius: 50%; 
+        animation: breatheCycleSmooth 19s infinite ease-in-out; 
+    }}
+    
+    .breath-label {{ font-size: 1.6rem; font-weight: bold; color: #2c3e50; margin-top: 25px; letter-spacing: 1px; }}
+    .breath-label::after {{ content: 'Focus...'; animation: labelCycleSmooth 19s infinite; }}
+
+    @keyframes breatheCycleSmooth {{
+        0%, 100%, 5% {{ width: 80px; height: 80px; opacity: 0.5; }} 
+        21% {{ width: 220px; height: 220px; opacity: 1; }} 
+        58% {{ width: 220px; height: 220px; opacity: 1; }}
+        100% {{ width: 80px; height: 80px; opacity: 0.5; }}
+    }}
+    @keyframes labelCycleSmooth {{
+        0%, 5% {{ content: 'Ready...'; }}
+        6%, 21% {{ content: 'Inhale (4s)'; }}
+        22%, 58% {{ content: 'Hold (7s)'; }}
+        59%, 99% {{ content: 'Exhale (8s)'; }}
+    }}
+</style>
+""", unsafe_allow_html=True)
+
+# --- 7. MAIN INTERFACE ---
+st.markdown(f"<h1 style='text-align: center;'>{L['title']}</h1>", unsafe_allow_html=True)
+nav_options = [L["chat_tab"], L["phq_tab"], L["breath_tab"], L["cloud_tab"]]
+selected_page = st.radio("", options=nav_options, horizontal=True, label_visibility="collapsed")
+st.divider()
+
+# --- TAB 1: HYPER-RESPONSIVE ASSISTANT ---
+if selected_page == L["chat_tab"]:
+    col1, col2 = st.columns([9, 1])
+    with col2: 
+        if st.button("🎙️"): voice_input_js(lang_choice)
+    
+    for i, m in enumerate(st.session_state.messages):
+        role_class = "user-bubble" if m["role"] == "user" else "assistant-bubble"
+        st.write(f'<div class="chat-bubble {role_class}">{m["content"]}</div>', unsafe_allow_html=True)
+        if m["role"] == "assistant" and st.button(f"🔊 Listen", key=f"sp_{i}"): speak_text(m["content"], lang_choice)
+            
+    if prompt := st.chat_input("Tell me what's on your mind..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        # ADVANCED RESPONSIVE BRAIN
+        sentiment = TextBlob(prompt).sentiment.polarity
+        user_input = prompt.lower()
+        
+        # Response Logic Engine
+        if any(w in user_input for w in ["hi", "hello", "hey", "namaste"]):
+            bot_res = random.choice(L["responses"]["greetings"])
+        
+        elif "sleep" in user_input or "tired" in user_input:
+            bot_res = "I hear how exhausted you are. Poor sleep can make everything feel heavy. 🌙 **Solution:** Try setting a 'Digital Sunset'—no screens 45 minutes before bed. You could also try the 4-7-8 breathing method in the next tab."
+        
+        elif "exam" in user_input or "study" in user_input or "test" in user_input:
+            bot_res = "Exam stress is real and very draining. 📚 **Strategy:** Break your study into 25-minute Pomodoro sessions. Focus only on one small chapter today. You're doing your best, and that’s enough."
+        
+        elif "stress" in user_input or "work" in user_input or "pressure" in user_input:
+            bot_res = "That sounds like a heavy load to carry. ⚖️ **Action Plan:** Write down the top 3 tasks stressing you out. Focus only on the first one. Let the rest wait until tomorrow. Take a deep breath with me."
+        
+        elif "alone" in user_input or "lonely" in user_input or "nobody" in user_input:
+            bot_res = "It’s hard to feel like you're on your own. 🤝 **Suggestion:** Sometimes just hearing a human voice helps. Could you call one person today, even if just for 2 minutes? I'm here to chat whenever you need."
+        
+        elif "anxious" in user_input or "scared" in user_input or "panic" in user_input:
+            bot_res = "Let's bring you back to safety right now. ⚓ **Grounding Technique:** Name 5 things you can see and 4 things you can touch. Your heart rate will slow down. You are safe here."
+        
+        elif "family" in user_input or "parent" in user_input or "friend" in user_input:
+            bot_res = "Relationships are complex and can be hurtful. 🫂 **Perspective:** You cannot control others, but you can set boundaries for your own peace. Focus on what you need to feel okay today."
+        
+        elif sentiment < -0.4:
+            bot_res = "I’m truly sorry you're feeling this low. 🌱 **Small Step:** Try to drink a glass of water and look out a window for a moment. Small movements help shift your energy. Would you like to talk more?"
+        
+        else:
+            bot_res = "I'm listening closely. It sounds like you've been through a lot. Can you tell me a bit more about what’s making you feel this way? I'm here to figure it out with you."
+
+        st.session_state.messages.append({"role": "assistant", "content": bot_res})
+        if st.session_state.logged_in and "**" in bot_res:
+            st.session_state.last_sol = bot_res
+        st.rerun()
+
+    if st.session_state.logged_in and "last_sol" in st.session_state:
+        st.info("💡 Useful advice detected! Want to track this as a personal goal?")
+        if st.button("💾 Yes, Save to my Goals"):
+            add_goal(st.session_state.username, st.session_state.last_sol.split("**")[-1])
+            del st.session_state.last_sol
+            st.success("Goal Saved! Visit the 'Progress & Goals' tab to track it.")
+
+# --- TAB 2: PHQ-9 (PATIENT DETAILS RESTORED) ---
+elif selected_page == L["phq_tab"]:
+    st.subheader("📊 Clinical PHQ-9 Assessment")
+    st.write("### Patient Information")
+    c1, c2, c3 = st.columns(3)
+    p_name = c1.text_input("Patient Full Name")
+    p_age = c2.number_input("Age", 1, 120, 25)
+    p_gender = c3.selectbox("Gender", ["Male", "Female", "Other", "Prefer not to say"])
+    
+    st.divider()
+    st.write("#### Over the last 2 weeks, how often have you been bothered by:")
     opts = ["Not at all", "Several days", "More than half the days", "Nearly every day"]
     scores = []
     for i, q in enumerate(L["q_list"]):
-        choice = st.radio(f"**{i+1}. {q}**", opts, key=f"q{i}", horizontal=True)
-        scores.append(opts.index(choice))
-    if st.button(L["submit_btn"]):
-        if not user_name: st.warning("Please enter your name.")
+        scores.append(opts.index(st.radio(f"**{i+1}. {q}**", opts, key=f"q{i}", horizontal=True)))
+    
+    if st.button("Generate Professional Report", type="primary"):
+        if not p_name: st.warning("Please enter patient name.")
         else:
             total = sum(scores)
-            status = "Severe" if total > 19 else "Moderate" if total > 9 else "Minimal"
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.set_fill_color(44, 62, 80); pdf.rect(0, 0, 210, 45, 'F')
-            pdf.set_text_color(255, 255, 255); pdf.set_font("Arial", 'B', 24)
-            pdf.cell(0, 20, "MINDCARE INDIA", ln=True, align='C')
-            pdf.ln(30); pdf.set_text_color(0, 0, 0); pdf.set_font("Arial", 'B', 12)
-            pdf.cell(95, 10, f" Name: {user_name.upper()}", border=1)
-            pdf.cell(95, 10, f" Score: {total} / 27", ln=True, border=1)
-            pdf.set_y(-30); pdf.set_font("Arial", 'I', 8); pdf.set_text_color(150, 150, 150)
-            pdf.multi_cell(0, 5, "Disclaimer: AI screening report. Consult a professional doctor.", align='C')
-            report_bytes = pdf.output(dest='S').encode('latin-1')
-            st.download_button("📥 Download Official Report", report_bytes, f"MindCare_{user_name}.pdf")
+            pdf = FPDF(); pdf.add_page(); pdf.set_font("Arial", 'B', 16)
+            pdf.cell(0, 10, "MINDCARE INDIA - CLINICAL REPORT", ln=True, align='C')
+            pdf.ln(10); pdf.set_font("Arial", '', 12)
+            pdf.cell(0, 10, f"Patient Name: {p_name}", ln=True)
+            pdf.cell(0, 10, f"Age: {p_age} | Gender: {p_gender}", ln=True)
+            pdf.cell(0, 10, f"Total PHQ-9 Score: {total}/27", ln=True)
+            pdf.ln(10); pdf.cell(0,10, "Disclaimer: This is a screening tool, not a clinical diagnosis.", ln=True)
+            st.success(f"Assessment complete. Total Score: {total}")
+            st.download_button("📥 Download PDF Report", pdf.output(dest='S').encode('latin-1'), f"Report_{p_name}.pdf")
 
-# --- TAB 3: BREATHING ---
-with tab3:
-    st.subheader(L["breath_tab"])
-    col_b1, col_b2 = st.columns([1, 1])
-    with col_b1:
-        st.markdown(f"""<div class="instruction-box">1. 🌬️ <b>{L['inhale']}</b>: Circle grows (4s).<br><br>2. 🛑 <b>{L['hold']}</b>: Keep it full (4s).<br><br>3. 🌬️ <b>{L['exhale']}</b>: Circle shrinks (4s).<br><br>4. 🛑 <b>{L['hold']}</b>: Keep it small (4s).</div>""", unsafe_allow_html=True)
-    with col_b2:
-        st.markdown("""<audio autoplay loop><source src="https://www.soundjay.com/nature/sounds/ocean-wave-1.mp3" type="audio/mpeg"></audio>""", unsafe_allow_html=True)
-        st.markdown('<div class="circle-container"><div class="circle"><span class="breath-text"></span></div></div>', unsafe_allow_html=True)
-
-# --- TAB 4: UPGRADED MOOD ANALYTICS ---
-with tab4:
-    user_text = " ".join([m["content"] for m in st.session_state.messages if m["role"]=="user"]).lower()
+# --- TAB 3: BREATHING (SMOOTH & STEADY) ---
+elif selected_page == L["breath_tab"]:
+    st.subheader("🧘 Clinical 4-7-8 Breathing Space")
+    st.info("Follow the circle carefully. This technique resets your nervous system.")
+    st.markdown('<div class="breath-container"><div class="visualizer"><div class="inner-circle"></div></div><div class="breath-label"></div></div>', unsafe_allow_html=True)
     
-    if user_text:
-        st.subheader("Your Emotional Insights")
-        
-        # Sentiment Analysis
-        analysis = TextBlob(user_text)
-        sentiment_score = analysis.sentiment.polarity
-        
-        col_m1, col_m2 = st.columns(2)
-        
-        with col_m1:
-            # Pie Chart for Sentiment
-            pos = len([w for w in user_text.split() if TextBlob(w).sentiment.polarity > 0])
-            neg = len([w for w in user_text.split() if TextBlob(w).sentiment.polarity < 0])
-            neu = len(user_text.split()) - (pos + neg)
-            
-            fig1, ax1 = plt.subplots(figsize=(5, 5))
-            ax1.pie([pos, neg, neu], labels=['Positive', 'Negative', 'Neutral'], 
-                    autopct='%1.1f%%', colors=['#88c9bf', '#ff9999', '#e0e0e0'], startangle=90)
-            ax1.set_title("Sentiment Distribution")
-            st.pyplot(fig1)
 
-        with col_m2:
-            # Bar Chart for Keywords
-            words = re.findall(r'\w+', user_text)
-            # Filter common filler words
-            stop_words = ["i", "me", "my", "am", "is", "are", "the", "a", "an", "and", "to", "feel", "feeling"]
-            filtered_words = [w for w in words if w not in stop_words and len(w) > 2]
-            word_counts = Counter(filtered_words).most_common(5)
-            
-            if word_counts:
-                df_words = pd.DataFrame(word_counts, columns=['Word', 'Count'])
-                fig2, ax2 = plt.subplots(figsize=(5, 5))
-                ax2.bar(df_words['Word'], df_words['Count'], color='#88c9bf')
-                ax2.set_title("Top Emotional Keywords")
-                st.pyplot(fig2)
-
-        st.divider()
-        st.write("### Mood Word Cloud")
-        wc = WordCloud(width=800, height=300, background_color="white", colormap="viridis").generate(user_text)
-        fig3, ax3 = plt.subplots()
-        ax3.imshow(wc)
-        ax3.axis("off")
-        st.pyplot(fig3)
+# --- TAB 4: GOALS ---
+elif selected_page == L["cloud_tab"]:
+    if not st.session_state.logged_in: st.warning("Please login via the sidebar to track your goals.")
     else:
-        st.info("Start chatting with the assistant to see your mood analysis here!")
+        st.write(f"### 🎯 {st.session_state.username}'s Active Goals")
+        goals = get_goals(st.session_state.username)
+        if goals:
+            for g_id, g_text, g_status in goals:
+                col_g1, col_g2 = st.columns([5,1])
+                col_g1.info(f"📅 {g_text}")
+                if col_g2.button("Done ✅", key=f"g_{g_id}"): delete_goal(g_id); st.rerun()
+        else: st.write("No goals set yet. Talk to the assistant to get some suggestions!")
+ 
